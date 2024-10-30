@@ -1,8 +1,11 @@
-#include "include/socket.hpp"
+#include "socket.hpp"
+#include <iostream>
 
 network::socket_base::socket_base(const std::string &hostname, int port) : host{}, hostname{hostname}, port{port}, socket_fd{-1} {
 
 };
+
+network::socket_base::~socket_base() {}
 
 bool network::socket_base::is_connected(){
     return socket_fd != -1;
@@ -26,14 +29,13 @@ bool network::socket_base::dns_lookup(const std::string &hostname){
         return false;
     }
 
-    char dnshost[256]; // TODO: string
+    std::string dnshost{};
 
     struct addrinfo* p = res;
-    getnameinfo(p->ai_addr, p->ai_addrlen, dnshost, sizeof(host), NULL, 0, NI_NUMERICHOST);
+    getnameinfo(p->ai_addr, p->ai_addrlen, dnshost.data(), sizeof(host), NULL, 0, NI_NUMERICHOST);
     freeaddrinfo(res);
 
-    host.host = new char[strlen(dnshost) + 1];
-    strcpy(host.host, dnshost);
+    host.host = dnshost;
     host.success = true;
 
     return true;
@@ -47,29 +49,29 @@ network::connect_response network::socket_base::connect(){
 
     bool success = dns_lookup(hostname);
     if (!success){
-        return connect_response::DNS_LOOKUP_FAIL;
+        return connect_response::CONNECT_DNS_LOOKUP_FAIL;
     }
 
-    if (inet_pton(AF_INET, host.host, &server_address.sin_addr) <= 0) {
+    if (inet_pton(AF_INET, host.host.c_str(), &server_address.sin_addr) <= 0) {
         ::close(socket_fd);
 
-        return connect_response::BAD_IP;
+        return connect_response::CONNECT_BAD_IP;
     }
 
     if (::connect(socket_fd, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
         ::close(socket_fd);
 
-        return connect_response::CONNECTION_FAIL;
+        return connect_response::CONNECT_FAIL;
     }
 
-    return connect_response::SUCCESS;
+    return connect_response::CONNECT_SUCCESS;
 }
 
 network::receive_response network::socket_base::receive_data(
     std::vector<uint8_t> &data, 
     int &err,
-    const int timeout_ms = 3000,
-    const int chunk_size = 4096
+    const int timeout_ms,
+    const int chunk_size
 ){
     fd_set fd;
     FD_ZERO(&fd);
@@ -86,9 +88,9 @@ network::receive_response network::socket_base::receive_data(
         int ret = select(socket_fd + 1, &fd, nullptr, nullptr, &timeout);
         if (ret < 0){
             err = errno;
-            return receive_response::SELECT_ERR;
+            return receive_response::RECEIVE_SELECT_ERR;
         } else if (ret == 0){
-            return receive_response::TIMEOUT;
+            return receive_response::RECEIVE_TIMEOUT;
         }
 
         if (data.size() < chunk_size + current_position){
@@ -105,12 +107,29 @@ network::receive_response network::socket_base::receive_data(
     }
 
     data.resize(current_position);
-    return receive_response::SUCCESS;
+    return receive_response::RECEIVE_SUCCESS;
 };
+
+network::receive_response network::socket_base::receive_string(
+    std::string &buff, 
+    int &err,
+    const int timeout_ms,
+    const int chunk_size
+){
+    std::vector<uint8_t> bytes{};
+
+    network::receive_response response = receive_data(bytes, err, timeout_ms, chunk_size);
+
+    if (response == receive_response::RECEIVE_SUCCESS){
+        buff = std::string(bytes.begin(), bytes.end());
+    }
+
+    return response;
+}
 
 network::send_response network::socket_base::send_data(const std::vector<uint8_t> &data, int &err) {
     if (!is_connected()){
-        return send_response::NOT_CONNECTED;
+        return send_response::SEND_SUCCESS;
     }
 
     size_t total_sent = 0;
@@ -118,7 +137,7 @@ network::send_response network::socket_base::send_data(const std::vector<uint8_t
 
     while (total_sent < len) {
         int sent = send_data_internal(data.data() + total_sent, len - total_sent);
-        if (sent < 0){
+        if (sent <= 0){
             err = get_error(sent);
             return send_response::SEND_ERR;
         }
@@ -126,7 +145,17 @@ network::send_response network::socket_base::send_data(const std::vector<uint8_t
         total_sent += sent;
     }
 
-    return send_response::SUCCESS;
+    return send_response::SEND_SUCCESS;
+}
+
+network::send_response network::socket_base::send_string(const std::string &data, int &err){
+    std::vector<uint8_t> bytes{data.begin(), data.end()};
+
+    return send_data(bytes, err);
+}
+
+const network::dns_host network::socket_base::get_dns_host(){
+    return host;
 }
 //
 // HTTP SOCKET
@@ -137,6 +166,10 @@ network::http_socket::http_socket(const std::string &host, int port) : socket_ba
     if (socket_fd < 0){
         throw std::runtime_error("Socket creation error: " + std::to_string(errno));
     }
+}
+
+network::http_socket::~http_socket() {
+    close();
 }
 
 ssize_t network::http_socket::send_data_internal(const void* data, size_t amt) {
@@ -161,7 +194,7 @@ bool network::http_socket::close(){
 //
 // HTTPS SOCKET
 //
-network::https_socket::https_socket(const std::string &host, int port = 443) : socket_base{host, port}, ssl{nullptr}, ssl_ctx{nullptr} {
+network::https_socket::https_socket(const std::string &host, int port) : socket_base{host, port} {
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
@@ -175,6 +208,32 @@ network::https_socket::https_socket(const std::string &host, int port = 443) : s
     if (socket_fd == -1) {
         throw std::runtime_error("Socket creation error: " + std::to_string(errno));
     }
+}
+
+network::https_socket::~https_socket() {
+    close();
+}
+
+network::connect_response network::https_socket::connect(){
+    network::connect_response tcp_connect_result = socket_base::connect();
+    if (tcp_connect_result != network::connect_response::CONNECT_SUCCESS) {
+        return tcp_connect_result;
+    }
+
+    ssl = SSL_new(ssl_ctx);
+    if (!ssl) {
+        return network::connect_response::CONNECT_SSL_CREATE_FAIL;
+    }
+
+    if (!SSL_set_fd(ssl, socket_fd)) {
+        return network::connect_response::CONNECT_SSL_SET_FD_FAIL;
+    }
+
+    if (SSL_connect(ssl) <= 0) {
+        return network::connect_response::CONNECT_SSL_HANDSHAKE_FAIL;
+    }
+
+    return network::connect_response::CONNECT_SUCCESS;
 }
 
 ssize_t network::https_socket::send_data_internal(const void* data, size_t amt){
