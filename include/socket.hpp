@@ -36,7 +36,7 @@ namespace network {
         bool success;
         int err;
 
-        dns_host() : host{nullptr}, success{false}, err{-1} {};
+        dns_host() : host{nullptr}, success{false}, err{-1} {}; // TODO: std::unique_ptr()
         ~dns_host(){ 
             delete[] host; 
         }

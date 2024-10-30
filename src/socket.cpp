@@ -8,9 +8,7 @@ bool network::socket_base::is_connected(){
     return socket_fd != -1;
 };
 
-/*
-    Only lookup hostname zero or one time.
-*/
+// Only lookup hostname zero or one time.
 bool network::socket_base::dns_lookup(const std::string &hostname){
     if (host.success){
         return true;
@@ -28,7 +26,7 @@ bool network::socket_base::dns_lookup(const std::string &hostname){
         return false;
     }
 
-    char dnshost[256];
+    char dnshost[256]; // TODO: string
 
     struct addrinfo* p = res;
     getnameinfo(p->ai_addr, p->ai_addrlen, dnshost, sizeof(host), NULL, 0, NI_NUMERICHOST);
