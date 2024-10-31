@@ -56,7 +56,8 @@ namespace network {
             socket_base(const std::string &hostname, int port);
             virtual ~socket_base() = 0;
 
-            const dns_host get_dns_host();
+            const dns_host get_dns_host() const;
+            const std::string get_hostname() const;
             send_response send_data(const std::vector<uint8_t> &data, int& err);
             send_response send_string(const std::string &data, int &err);
             receive_response receive_data(std::vector<uint8_t> &buff, int &err, const int timeout_ms = 3000, const int chunk_size = 4096);

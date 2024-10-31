@@ -154,9 +154,14 @@ network::send_response network::socket_base::send_string(const std::string &data
     return send_data(bytes, err);
 }
 
-const network::dns_host network::socket_base::get_dns_host(){
+const network::dns_host network::socket_base::get_dns_host() const {
     return host;
 }
+
+const std::string network::socket_base::get_hostname() const {
+    return hostname;
+}
+
 //
 // HTTP SOCKET
 //

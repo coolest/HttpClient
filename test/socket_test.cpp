@@ -1,30 +1,105 @@
 #include "socket.hpp"
 #include <iostream>
 
+void print_error(const network::socket_base &socket, const std::string &err){
+    printf("ERROR IN SOCKET{%s}:\n%s", 
+        socket.get_hostname().c_str(), 
+        err.c_str());
+}
+
+void handle_bad_connect(
+    const network::socket_base &socket, 
+    const network::connect_response &response,
+    const int &err
+){
+    switch(response){
+        case network::connect_response::CONNECT_BAD_IP: 
+            print_error(socket, "CONNECT BAD IP"); break;
+        case network::connect_response::CONNECT_DNS_LOOKUP_FAIL:
+            print_error(socket, "CONNECT DNS LOOKUP FAIL\nERROR: " + std::to_string(socket.get_dns_host().err)); break;
+        case network::connect_response::CONNECT_FAIL: 
+            print_error(socket, "CONNECT FAIL\nERROR: " + std::to_string(err)); break;
+        case network::connect_response::CONNECT_SSL_CREATE_FAIL:
+            print_error(socket, "CONNECT SSL CREATE FAIL"); break;
+        case network::connect_response::CONNECT_SSL_HANDSHAKE_FAIL:
+            print_error(socket, "CONNECT SSL HANDSHAKE FAIL"); break;
+        case network::connect_response::CONNECT_SSL_SET_FD_FAIL:
+            print_error(socket, "CONNECT SSL SET FD FAIL"); break;
+        default: break;
+    }
+}
+
+void handle_bad_send(
+    const network::socket_base &socket, 
+    const network::send_response &response,
+    const int &err
+){
+    switch (response){
+        case network::send_response::SEND_ERR:
+            print_error(socket, "SEND ERROR\nERROR: " + std::to_string(err)); break;
+        case network::send_response::SEND_NOT_CONNECTED:
+            print_error(socket, "SOCKET NOT CONNECTED, CANNOT SEND"); break;
+        default: break;
+    }
+}
+
+void handle_bad_receive(
+    const network::socket_base &socket, 
+    const network::receive_response &response,
+    const int &err
+){
+    switch(response){
+        case network::receive_response::RECEIVE_ERROR:
+            print_error(socket, "RECEIVE ERROR\nERROR: " + std::to_string(err)); break;
+        case network::receive_response::RECEIVE_SELECT_ERR:
+            print_error(socket, "SELECT ERROR\nERROR: " + std::to_string(err)); break;
+        case network::receive_response::RECEIVE_TIMEOUT:
+            print_error(socket, "RECEIVE TIMEOUT"); break;
+        default: break;
+    }
+}
+
 int main(){
-    int ignore_flag{};
+    int err{};
 
-    std::cout << "here\n";
+    std::cout << "Starting HTTPS socket test...\n";
 
-    network::https_socket socket{"www.google.com", 443};
-    network::connect_response r = socket.connect();
-    std::cout << r << std::endl;
-    std::cout << socket.get_dns_host().err << std::endl;
+    network::https_socket socket{"www.google.com"};
+    std::cout << "Socket created for: www.google.com\n";
 
-    socket.send_string(
+    std::cout << "Attempting to connect...\n";
+    network::connect_response connect_res = socket.connect();
+    if (connect_res != network::connect_response::CONNECT_SUCCESS){
+        handle_bad_connect(socket, connect_res, err);
+        return 1;
+    }
+    std::cout << "Connection successful!\n";
+
+    std::cout << "Sending HTTP GET request...\n";
+    network::send_response send_res = socket.send_string(
         "GET / HTTP/1.1\r\n"
         "Host: www.google.com\r\n"
         "Connection: close\r\n"
         "User-Agent: Mozilla/5.0\r\n"
         "\r\n",
-        ignore_flag
-    );
+        err);
+    if (send_res != network::send_response::SEND_SUCCESS){
+        handle_bad_send(socket, send_res, err);
+        return 1;
+    }
+    std::cout << "Request sent successfully!\n";
 
-    std::cout << "here\n" << ignore_flag << std::endl;
-
+    std::cout << "Waiting for response...\n";
     std::string res{};
-    network::receive_response r2 = socket.receive_string(res, ignore_flag);
-    std::cout << r2 << " " << ignore_flag << std::endl;
+    network::receive_response receive_res = socket.receive_string(res, err);
+    if (receive_res != network::receive_response::RECEIVE_SUCCESS){
+        handle_bad_receive(socket, receive_res, err);
+        return 1;
+    }
+    
+    std::cout << "Response received! First 100 characters:\n";
+    std::cout << res.substr(0, 100) << "...\n";
 
-    std::cout << res << std::endl;
+    std::cout << "Test completed successfully!\n";
+    return 0;
 }
