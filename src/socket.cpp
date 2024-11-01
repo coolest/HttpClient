@@ -1,5 +1,4 @@
 #include "socket.hpp"
-#include <iostream>
 
 network::socket_base::socket_base(const std::string &hostname, int port) : host{}, hostname{hostname}, port{port}, socket_fd{-1} {
 
