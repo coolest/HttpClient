@@ -48,7 +48,7 @@ namespace network {
         bool success;
         int err;
 
-        dns_host() : host{}, success{false}, err{-1} {}; // TODO: std::unique_ptr()
+        dns_host() : host{}, success{false}, err{-1} {};
         ~dns_host(){}
     };
 
