@@ -7,8 +7,19 @@ network::socket_base::socket_base(const std::string &hostname, int port) : host{
 
 network::socket_base::~socket_base() {}
 
+bool network::socket_base::close(){
+    if (!socket_base::is_connected()){
+        return true;
+    }
+
+    int close_err = ::close(socket_fd);
+    socket_fd = -1;
+
+    return !close_err;
+}
+
 bool network::socket_base::is_connected(){
-    return socket_fd != -1;
+    return socket_fd >= 0;
 };
 
 // Only lookup hostname zero or one time.
@@ -25,17 +36,20 @@ bool network::socket_base::dns_lookup(const std::string &hostname){
     int err = getaddrinfo(hostname.c_str(), NULL, &hints, &res);
     if (err != 0) {
         host.err = err;
-
         return false;
     }
 
-    std::string dnshost{};
-
+    char host_buffer[NI_MAXHOST];
     struct addrinfo* p = res;
-    getnameinfo(p->ai_addr, p->ai_addrlen, dnshost.data(), sizeof(host), NULL, 0, NI_NUMERICHOST);
+    err = getnameinfo(p->ai_addr, p->ai_addrlen, host_buffer, sizeof(host_buffer), NULL, 0, NI_NUMERICHOST);
     freeaddrinfo(res);
 
-    host.host = dnshost;
+    if (err != 0){
+        host.err = err;
+        return false;
+    }
+
+    host.host = host_buffer;
     host.success = true;
 
     return true;
@@ -53,14 +67,12 @@ network::connect_response network::socket_base::connect(){
     }
 
     if (inet_pton(AF_INET, host.host.c_str(), &server_address.sin_addr) <= 0) {
-        ::close(socket_fd);
-
+        socket_base::close();
         return connect_response::CONNECT_BAD_IP;
     }
 
     if (::connect(socket_fd, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
-        ::close(socket_fd);
-
+        socket_base::close();
         return connect_response::CONNECT_FAIL;
     }
 
@@ -73,18 +85,22 @@ network::receive_response network::socket_base::receive_data(
     const int timeout_ms,
     const int chunk_size
 ){
-    fd_set fd;
-    FD_ZERO(&fd);
-    FD_SET(socket_fd, &fd);
+    if (!is_connected()){
+        return receive_response::RECEIVE_NOT_CONNECTED;
+    }
 
-    timeval timeout;
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000; 
+    size_t current_position = 0;
+    ssize_t bytes = -1;
 
-    int current_position = 0;
-    int bytes = -1;
+    while (true){
+        fd_set fd;
+        FD_ZERO(&fd);
+        FD_SET(socket_fd, &fd);
 
-    while (bytes != 0){
+        timeval timeout;
+        timeout.tv_sec = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000; 
+
         int ret = select(socket_fd + 1, &fd, nullptr, nullptr, &timeout);
         if (ret < 0){
             err = errno;
@@ -101,13 +117,19 @@ network::receive_response network::socket_base::receive_data(
         if (bytes < 0){
             err = get_error(bytes);
             return receive_response::RECEIVE_ERROR;
+        } else if (bytes == 0){
+            break;
         }
 
         current_position += bytes;
     }
 
     data.resize(current_position);
-    return receive_response::RECEIVE_SUCCESS;
+    if (current_position > 0){
+        return receive_response::RECEIVE_SUCCESS;
+    } else {
+        return receive_response::RECEIVE_CLOSED;
+    }
 };
 
 network::receive_response network::socket_base::receive_string(
@@ -129,7 +151,7 @@ network::receive_response network::socket_base::receive_string(
 
 network::send_response network::socket_base::send_data(const std::vector<uint8_t> &data, int &err) {
     if (!is_connected()){
-        return send_response::SEND_SUCCESS;
+        return send_response::SEND_NOT_CONNECTED;
     }
 
     size_t total_sent = 0;
@@ -161,65 +183,79 @@ const network::dns_host network::socket_base::get_dns_host() const {
 const std::string network::socket_base::get_hostname() const {
     return hostname;
 }
-
 //
 // HTTP SOCKET
 //
 network::http_socket::http_socket(const std::string &host, int port) : socket_base{host, port} {
-    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (socket_fd < 0){
-        throw std::runtime_error("Socket creation error: " + std::to_string(errno));
-    }
 }
 
 network::http_socket::~http_socket() {
-    close();
+    socket_base::close();
+}
+
+network::create_response network::http_socket::create(){
+    socket_base::close();
+
+    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0){
+        return create_response::CREATE_FAIL;
+    }
+
+    return create_response::CREATE_SUCCESS;
 }
 
 ssize_t network::http_socket::send_data_internal(const void* data, size_t amt) {
     return send(socket_fd, data, amt, 0);
 }
 
-int network::http_socket::receive_data_internal(void* data, size_t amt){
+ssize_t network::http_socket::receive_data_internal(void* data, size_t amt){
     return recv(socket_fd, data, amt, 0);
 }
 
 int network::http_socket::get_error(int res){
     return errno;
 }
-
-bool network::http_socket::close(){
-    if (socket_fd == -1){
-        return true;
-    }
-
-    return ::close(socket_fd) == -1;
-}
 //
 // HTTPS SOCKET
 //
+SSL_CTX* network::https_socket::ssl_ctx = nullptr;
+std::mutex network::https_socket::ssl_ctx_mutex{};
+
 network::https_socket::https_socket(const std::string &host, int port) : socket_base{host, port} {
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-    SSL_load_error_strings();
 
-    ssl_ctx = SSL_CTX_new(TLS_client_method());
-    if (!ssl_ctx) {
-        throw std::runtime_error("Failed to create SSL context");
-    }
-
-    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd == -1) {
-        throw std::runtime_error("Socket creation error: " + std::to_string(errno));
-    }
 }
 
 network::https_socket::~https_socket() {
-    close();
+    https_socket::close();
+}
+
+network::create_response network::https_socket::create(){
+    socket_base::close();
+
+    if (!ssl_ctx){
+        std::lock_guard<std::mutex> lock{ssl_ctx_mutex};
+        if (!ssl_ctx){
+            ssl_ctx = SSL_CTX_new(TLS_client_method());
+            if (!ssl_ctx) {
+                return create_response::CREATE_SSL_CTX_FAIL;
+            }
+        }
+    }
+
+    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0){
+        return create_response::CREATE_FAIL;
+    }
+
+    return create_response::CREATE_SUCCESS;
 }
 
 network::connect_response network::https_socket::connect(){
+    if (!ssl_ctx){
+        return network::connect_response::CONNECT_SSL_CTX_NOT_INITIALIZED;
+    }
+
     network::connect_response tcp_connect_result = socket_base::connect();
     if (tcp_connect_result != network::connect_response::CONNECT_SUCCESS) {
         return tcp_connect_result;
@@ -231,10 +267,16 @@ network::connect_response network::https_socket::connect(){
     }
 
     if (!SSL_set_fd(ssl, socket_fd)) {
+        SSL_free(ssl);
+        ssl = nullptr;
+
         return network::connect_response::CONNECT_SSL_SET_FD_FAIL;
     }
 
     if (SSL_connect(ssl) <= 0) {
+        SSL_free(ssl);
+        ssl = nullptr;
+
         return network::connect_response::CONNECT_SSL_HANDSHAKE_FAIL;
     }
 
@@ -245,7 +287,7 @@ ssize_t network::https_socket::send_data_internal(const void* data, size_t amt){
     return SSL_write(ssl, data, amt);
 }
 
-int network::https_socket::receive_data_internal(void* data, size_t amt){
+ssize_t network::https_socket::receive_data_internal(void* data, size_t amt){
     return SSL_read(ssl, data, amt);
 }
 
@@ -257,12 +299,19 @@ bool network::https_socket::close(){
     if (ssl != nullptr){
         SSL_shutdown(ssl);
         SSL_free(ssl);
+        ssl = nullptr;
     }
 
-    if (ssl_ctx != nullptr){
-        SSL_CTX_free(ssl_ctx);
-        EVP_cleanup();
+    return socket_base::close();
+}
+
+void network::https_socket::free_ssl_ctx(){
+    std::lock_guard<std::mutex> lock{ssl_ctx_mutex};
+    
+    if (!ssl_ctx){
+        return;
     }
 
-    return socket_fd == -1 || ::close(socket_fd) == -1;
+    SSL_CTX_free(ssl_ctx);
+    ssl_ctx = nullptr;
 }
